@@ -1,4 +1,4 @@
-#include <WiFi.h>
+  #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
@@ -6,10 +6,6 @@
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
-#include <MD_Parola.h>
-#include <MD_MAX72xx.h>
-#include <SPI.h>
-
 
 //  NeoPixel Setup
 #define PIN        13        // Datenleitung für NeoPixel
@@ -36,29 +32,18 @@ String lastStatus       = "UNKNOWN";  // RAIN / CLEAR / OTHER
 String lastConditions   = "";         // Zusammenfassung der nächsten 9h
 unsigned long lastUpdateMillis = 0;
 
-// ===== DOTMATRIX + WETTERDATEN =====
-float lastTempC = 0.0;
-int   lastRainPct = 0;
-String lastWarn = "";        // "", "STORM", "ICE", "HOT"
-String lastIcon = "OTHER";   // CLEAR, RAIN, SNOW, THUNDER, FOG, CLOUD
-
-// ===== DOTMATRIX (MAX7219) =====
-#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
-#define MAX_DEVICES 4
-#define CS_PIN 5            // ⚠️ HIER DEIN CS/LOAD PIN EINTRAGEN
-
-MD_Parola mx = MD_Parola(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
-
 const unsigned long UPDATE_INTERVAL = 600000; // 10 min
 
+//  Webserver / Captive Portal 
+//  Webserver / Captive Portal 
 //  Webserver / Captive Portal 
 DNSServer dnsServer;
 WebServer server(80);
 
-
 const byte DNS_PORT = 53;
 const char* AP_SSID     = "Smart-Weather-Frog";
-const char* AP_PASSWORD = "";         // offen 
+const char* AP_PASSWORD = "";
+
 
 // LED Helper 
 
@@ -92,6 +77,8 @@ void loadConfig() {
 
   String savedKey = prefs.getString("apikey", "");
   if (savedKey.length() > 0) API_KEY = savedKey;
+  prefs.end();
+
 }
 
 // WLAN verbinden
@@ -201,8 +188,6 @@ void aktualisiereWetterUndLED() {
   }
 
   lastUpdateMillis = millis();
-  updateMatrix();
-
 }
 
 // Webinterface
@@ -341,26 +326,29 @@ void handleSaveWifi() {
   wifiSSID = server.arg("ssid");
   wifiPASS = server.arg("pass");
 
+  prefs.begin("rfrog", false);
   prefs.putString("wifi_ssid", wifiSSID);
   prefs.putString("wifi_pass", wifiPASS);
+  prefs.end();
 
   bool ok = connectWiFiFromPrefs(15000);
-  if (ok) {
-    aktualisiereWetterUndLED();
-  }
+  if (ok) aktualisiereWetterUndLED();
 
   server.send(200, "text/html",
               "<html><body><p>WLAN gespeichert.</p><a href=\"/\">Zurück</a></body></html>");
 }
+
 
 void handleSaveCity() {
   city1 = server.arg("city1");
   city2 = server.arg("city2");
   city3 = server.arg("city3");
 
+  prefs.begin("rfrog", false);
   prefs.putString("city1", city1);
   prefs.putString("city2", city2);
   prefs.putString("city3", city3);
+  prefs.end();
 
   blinkColor(0, 255, 0, 2, 200, 200);
   aktualisiereWetterUndLED();
@@ -368,6 +356,7 @@ void handleSaveCity() {
   server.send(200, "text/html",
               "<html><body><p>Städte gespeichert.</p><a href=\"/\">Zurück</a></body></html>");
 }
+
 
 // Captive-Portal
 
@@ -406,63 +395,12 @@ void startCaptivePortal() {
   dnsServer.start(DNS_PORT, "*", apIP);
 }
 
-// DOTMATRIX FUNKTIONEN 
-
-void matrixInit() {
-  mx.begin();
-  mx.setIntensity(2);
-  mx.displayClear();
-
-  mx.setZone(0, 0, 0);   // Icon
-  mx.setZone(1, 1, 3);   // Text
-
-  mx.displayZoneText(1, "", PA_LEFT, 0, 0, PA_PRINT, PA_NO_EFFECT);
-}
-
-const uint8_t ICON_SUN[8]    = {0x18,0x24,0x18,0xE7,0xE7,0x18,0x24,0x18};
-const uint8_t ICON_RAIN[8]   = {0x3C,0x7E,0xFF,0x24,0x24,0x48,0x48,0x00};
-const uint8_t ICON_CLOUD[8]  = {0x00,0x3C,0x7E,0xFF,0xFF,0x7E,0x3C,0x00};
-const uint8_t ICON_SNOW[8]   = {0x24,0x18,0x7E,0x18,0x18,0x7E,0x18,0x24};
-const uint8_t ICON_WARN[8]   = {0x18,0x3C,0x7E,0x7E,0x7E,0x18,0x18,0x18};
-const uint8_t ICON_FOG[8]    = {0x00,0x7E,0x00,0x7E,0x00,0x7E,0x00,0x00};
-const uint8_t ICON_OTHER[8]  = {0x00,0x66,0xFF,0x81,0x81,0xFF,0x66,0x00};
-
-void drawIcon(const uint8_t bmp[8]) {
-  MD_MAX72XX* g = mx.getGraphicObject();
-  for (uint8_t row = 0; row < 8; row++) {
-    g->setRow(0, row, bmp[row]);
-  }
-}
-
-String buildMatrixText() {
-  int t = (int)round(lastTempC);
-  String s = String(t) + "C ";
-  s += "R" + String(lastRainPct) + "%";
-  if (lastWarn.length() > 0) s += " !";
-  return s;
-}
-
-void updateMatrix() {
-  if (lastWarn.length() > 0) drawIcon(ICON_WARN);
-  else if (lastIcon == "CLEAR") drawIcon(ICON_SUN);
-  else if (lastIcon == "RAIN") drawIcon(ICON_RAIN);
-  else if (lastIcon == "SNOW") drawIcon(ICON_SNOW);
-  else if (lastIcon == "FOG") drawIcon(ICON_FOG);
-  else if (lastIcon == "CLOUD") drawIcon(ICON_CLOUD);
-  else drawIcon(ICON_OTHER);
-
-  String txt = buildMatrixText();
-  mx.displayZoneText(1, txt.c_str(), PA_LEFT, 0, 0, PA_PRINT, PA_NO_EFFECT);
-  mx.displayAnimate();
-}
 
 void setup() {
   Serial.begin(115200);
 
   pixels.begin();
   pixels.show();  // alle aus
-  matrixInit();
-
 
   loadConfig();
 
@@ -502,3 +440,4 @@ void loop() {
     aktualisiereWetterUndLED();
   }
 }
+
