@@ -1,4 +1,5 @@
-  #include <WiFi.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
@@ -31,6 +32,15 @@ String API_KEY = "9d08cb4fddffd0b07a76b2d3c7da85bf";
 String lastStatus       = "UNKNOWN";  // RAIN / CLEAR / OTHER
 String lastConditions   = "";         // Zusammenfassung der nächsten 9h
 unsigned long lastUpdateMillis = 0;
+int lastRainChance = -1;   // Regenwahrscheinlichkeit in % (max der nächsten ~9h)
+
+// --- WLAN-Fehler-Blinkmodus (dauerhaft rot, non-blocking) ---
+bool wifiConnectFailed = false;
+unsigned long blinkLastMs = 0;
+bool blinkOn = false;
+const unsigned long BLINK_ON_MS  = 250;
+const unsigned long BLINK_OFF_MS = 250;
+
 
 const unsigned long UPDATE_INTERVAL = 600000; // 10 min
 
@@ -45,7 +55,7 @@ const char* AP_SSID     = "Smart-Weather-Frog";
 const char* AP_PASSWORD = "";
 
 
-// LED Helper 
+/// LED Helper 
 
 void setAllPixels(uint8_t r, uint8_t g, uint8_t b) {
   for (int i = 0; i < NUMPIXELS; i++) {
@@ -62,6 +72,23 @@ void blinkColor(uint8_t r, uint8_t g, uint8_t b, int times, int onMs, int offMs)
     delay(offMs);
   }
 }
+
+// --- dauerhaft rot blinken (non-blocking) ---
+void blinkRedContinuousTask() {
+  if (!wifiConnectFailed) return;
+
+  unsigned long now = millis();
+  unsigned long interval = blinkOn ? BLINK_ON_MS : BLINK_OFF_MS;
+
+  if (now - blinkLastMs >= interval) {
+    blinkLastMs = now;
+    blinkOn = !blinkOn;
+
+    if (blinkOn) setAllPixels(255, 0, 0);  // Rot an
+    else         setAllPixels(0, 0, 0);    // aus
+  }
+}
+
 
 // Config laden
 
@@ -104,14 +131,15 @@ bool connectWiFiFromPrefs(unsigned long timeoutMs) {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WLAN verbunden!");
+    wifiConnectFailed = false;   
     blinkColor(0, 255, 0, 2, 200, 200); // 2x Grün
     return true;
   }
 
-  Serial.println("WLAN-Verbindung fehlgeschlagen.");
-  // kein Endlos-Loop mehr, damit Captive Portal starten kann
-  blinkColor(255, 0, 0, 3, 200, 200); // 3x Rot als Fehler-Hinweis
-  return false;
+ Serial.println("WLAN-Verbindung fehlgeschlagen.");
+ wifiConnectFailed = true;   // <--- Alarmmodus AN (dauerhaft rot blinken)
+ return false;
+
 }
 
 // Wetterdaten / Status 
@@ -125,6 +153,7 @@ String holeWetterStatus() {
   bool rainFound  = false;
   bool clearFound = false;
   lastConditions = "";
+  lastRainChance = -1;   // Reset bei jedem Update
 
   for (int c = 0; c < 3; c++) {
     if (cities[c].length() == 0) continue;
@@ -134,13 +163,46 @@ String holeWetterStatus() {
                  "&units=metric&lang=de";
 
     Serial.println("API Abruf für: " + cities[c]);
+    Serial.println("URL: " + url);
 
+    // ---- TLS / Internet / DNS Test (Port 443) ----
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(15000);
+
+    Serial.println("Teste TLS connect...");
+    if (!client.connect("api.openweathermap.org", 443)) {
+      Serial.println("TLS connect FAIL -> DNS/Internet/Firewall/Captive-Login Problem");
+      continue;
+    }
+    Serial.println("TLS connect OK");
+    client.stop();
+
+    // ---- HTTPS Request ----
     HTTPClient http;
-    http.begin(url);
+    http.setTimeout(15000);
+    http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+    if (!http.begin(client, url)) {
+      Serial.println("http.begin() fehlgeschlagen");
+      continue;
+    }
+
     int code = http.GET();
+
+    Serial.print("HTTP Code: ");
+    Serial.println(code);
+
+    if (code <= 0) {
+      Serial.print("HTTP Fehlertext: ");
+      Serial.println(http.errorToString(code));
+      http.end();
+      continue;
+    }
 
     if (code != 200) {
       Serial.println("HTTP Fehler: " + String(code));
+      Serial.println(http.getString()); // Body zeigt z.B. 401 etc.
       http.end();
       continue;
     }
@@ -157,14 +219,28 @@ String holeWetterStatus() {
     JsonArray list = doc["list"];
 
     // Erste 3 Zeitpunkte (~9h)
+    int maxPopPercentForThisCity = 0;
+
     for (int i = 0; i < 3; i++) {
       String mainW = list[i]["weather"][0]["main"].as<String>();
 
+      float pop = list[i]["pop"] | 0.0;     // 0.0 - 1.0
+      int popPercent = (int)round(pop * 100.0);
+
+      if (popPercent > maxPopPercentForThisCity) {
+        maxPopPercentForThisCity = popPercent;
+      }
+
       if (lastConditions.length() > 0) lastConditions += ", ";
-      lastConditions += mainW;
+      lastConditions += mainW + " (" + String(popPercent) + "%)";
 
       if (mainW == "Rain")  rainFound  = true;
       if (mainW == "Clear") clearFound = true;
+    }
+
+    // höchste Wahrscheinlichkeit über alle Städte merken
+    if (maxPopPercentForThisCity > lastRainChance) {
+      lastRainChance = maxPopPercentForThisCity;
     }
   }
 
@@ -172,6 +248,7 @@ String holeWetterStatus() {
   if (clearFound) return "CLEAR";
   return "OTHER";
 }
+
 
 void aktualisiereWetterUndLED() {
   Serial.println("=== Wetterupdate ===");
@@ -214,6 +291,7 @@ a.button{display:inline-block;padding:8px 12px;margin-top:8px;background:#0078d4
 
   html += "</p><p><b>Städte:</b> " + city1 + ", " + city2 + ", " + city3 + "</p>";
   html += "<p><b>Status:</b> " + lastStatus + "</p>";
+  html += "<p><b>Regenwahrscheinlichkeit:</b> " + String(lastRainChance) + "%</p>";
   html += "<p><b>Bedingungen:</b> " + lastConditions + "</p>";
 
   html += R"(
@@ -407,16 +485,26 @@ void setup() {
   bool wifiOK = connectWiFiFromPrefs(15000);
 
   if (wifiOK) {
-    // mDNS nur im STA-Modus sinnvoll
-    if (MDNS.begin("regenfrosch")) {
-      Serial.println("mDNS gestartet: http://regenfrosch.local");
-    } else {
-      Serial.println("mDNS Start fehlgeschlagen.");
-    }
+  // Debug: zeigt ob DNS/Gateway sauber sind
+  Serial.print("IP: ");      Serial.println(WiFi.localIP());
+  Serial.print("DNS: ");     Serial.println(WiFi.dnsIP());
+  Serial.print("Gateway: "); Serial.println(WiFi.gatewayIP());
+
+  // NTP Zeit setzen (hilft manchmal bei TLS)
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  delay(1500);
+
+  // mDNS nur im STA-Modus sinnvoll
+  if (MDNS.begin("regenfrosch")) {
+    Serial.println("mDNS gestartet: http://regenfrosch.local");
   } else {
-    // WLAN ging nicht → Captive Portal
-    startCaptivePortal();
+    Serial.println("mDNS Start fehlgeschlagen.");
   }
+} else {
+  // WLAN ging nicht → Captive Portal
+  startCaptivePortal();
+}
+
 
   setupWebServer();
 
@@ -427,17 +515,15 @@ void setup() {
 
 
 void loop() {
-  // Für Captive Portal (DNS)
   dnsServer.processNextRequest();
-
-  // HTTP-Requests verarbeiten
   server.handleClient();
 
-  // regelmäßige Wetterupdates
   unsigned long now = millis();
   if (WiFi.status() == WL_CONNECTED &&
       now - lastUpdateMillis > UPDATE_INTERVAL) {
     aktualisiereWetterUndLED();
   }
+
+  blinkRedContinuousTask();
 }
 
