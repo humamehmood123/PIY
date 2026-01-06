@@ -345,34 +345,82 @@ button{margin-top:15px;padding:10px 15px;background:#0078d4;color:white;border-r
   return html;
 }
 
+//citypage
 String htmlCityPage() {
   String html = R"(
 <!DOCTYPE html><html><head>
-<meta charset="utf-8"><title>Städte</title>
+<meta charset="utf-8">
+<title>Städte</title>
 <style>
 body{font-family:Arial;background:#e8f6ff;padding:20px;}
 .box{background:white;padding:15px;border-radius:8px;box-shadow:0 0 6px #0002;}
 label{display:block;margin-top:10px;}
+input{width:100%;padding:8px;}
+ul{list-style:none;padding:0;margin:0;border:1px solid #ccc;}
+li{padding:6px;cursor:pointer;background:#fff;}
+li:hover{background:#def;}
 button{margin-top:15px;padding:10px 15px;background:#0078d4;color:white;border-radius:6px;border:none;}
 </style>
-</head><body>
+</head>
+<body>
+
 <h1>Städte einstellen</h1>
 <div class="box">
+
 <form method="POST" action="/saveCity">
 <label>Stadt 1:</label>
-<input type="text" name="city1" value=")"+city1+R"(">
+<input type="text" name="city1" id="city1" value=")" + city1 + R"(" autocomplete="off">
+<ul id="list1"></ul>
+
 <label>Stadt 2:</label>
-<input type="text" name="city2" value=")"+city2+R"(">
+<input type="text" name="city2" id="city2" value=")" + city2 + R"(" autocomplete="off">
+<ul id="list2"></ul>
+
 <label>Stadt 3:</label>
-<input type="text" name="city3" value=")"+city3+R"(">
+<input type="text" name="city3" id="city3" value=")" + city3 + R"(" autocomplete="off">
+<ul id="list3"></ul>
+
 <button type="submit">Speichern</button>
 </form>
+
 <a href="/">Zurück</a>
 </div>
+
+<script>
+function setupAutocomplete(inputId, listId) {
+  const input = document.getElementById(inputId);
+  const list  = document.getElementById(listId);
+
+  input.addEventListener("input", async () => {
+    const q = input.value;
+    list.innerHTML = "";
+    if (q.length < 2) return;
+
+    const res = await fetch("/searchCity?q=" + encodeURIComponent(q));
+    const data = await res.json();
+
+    data.forEach(c => {
+      const li = document.createElement("li");
+      li.textContent = c.name + "," + c.country;
+      li.onclick = () => {
+        input.value = li.textContent;
+        list.innerHTML = "";
+      };
+      list.appendChild(li);
+    });
+  });
+}
+
+setupAutocomplete("city1","list1");
+setupAutocomplete("city2","list2");
+setupAutocomplete("city3","list3");
+</script>
+
 </body></html>
 )";
   return html;
 }
+
 
 //Captive-Portal-Handler
 
@@ -416,6 +464,56 @@ void handleSaveWifi() {
               "<html><body><p>WLAN gespeichert.</p><a href=\"/\">Zurück</a></body></html>");
 }
 
+//citysearch
+void handleCitySearch() {
+  // Im AP / Captive Portal kein externes Internet
+  if (WiFi.getMode() == WIFI_AP) {
+    server.send(200, "application/json", "[]");
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    server.send(200, "application/json", "[]");
+    return;
+  }
+
+  if (!server.hasArg("q")) {
+    server.send(400, "application/json", "[]");
+    return;
+  }
+
+  String query = server.arg("q");
+  if (query.length() < 2) {
+    server.send(200, "application/json", "[]");
+    return;
+  }
+
+  String url = "https://api.openweathermap.org/geo/1.0/direct?q=" +
+               query +
+               "&limit=5&appid=" + API_KEY;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setTimeout(10000);
+  http.begin(client, url);
+
+  int code = http.GET();
+
+  if (code != 200) {
+    http.end();
+    server.send(500, "application/json", "[]");
+    return;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  server.send(200, "application/json", payload);
+}
+
+
 
 void handleSaveCity() {
   city1 = server.arg("city1");
@@ -446,6 +544,8 @@ void setupWebServer() {
   server.on("/saveWifi",HTTP_POST, handleSaveWifi);
   server.on("/saveCity",HTTP_POST, handleSaveCity);
 
+  server.on("/searchCity", HTTP_GET, handleCitySearch);
+  
   // System-spezifische Captive-Portal-Checks
   server.on("/hotspot-detect.html", HTTP_GET, handleCaptiveTest);      // Apple
   server.on("/generate_204",        HTTP_GET, handleCaptiveTest);      // Android
